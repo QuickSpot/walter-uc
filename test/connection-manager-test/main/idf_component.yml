@@ -1,5 +1,0 @@
-dependencies:
-  espressif/catch2:
-    version: '*'
-  walter-comm:
-    path: ../../../
