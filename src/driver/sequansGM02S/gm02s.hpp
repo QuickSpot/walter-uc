@@ -55,7 +55,6 @@
 #include <esp_event.h>
 #include <esp_netif.h>
 #include <list>
-#include <utils.h>
 
 namespace driver::cellular {
 /**
@@ -179,7 +178,7 @@ public:
    * commands)
    */
   esp_modem::SQNGM02S* getModule();
-  PRIVATE
+
   esp_modem::command_result urcCallback(uint8_t* data, size_t len);
 
 private:

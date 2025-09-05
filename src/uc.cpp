@@ -104,7 +104,6 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
     ESP_LOGI(LOGTAG, "~~~~~~~~~~~~~~");
 
     xEventGroupSetBits(ip_event_group, STA_IP_BIT);
-    controller->triggerReconnect();
     break;
   }
   case IP_EVENT_STA_LOST_IP: {
@@ -164,7 +163,6 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
     ESP_LOGI(LOGTAG, "~~~~~~~~~~~~~~");
 
     xEventGroupSetBits(ip_event_group, PPP_IP_BIT);
-    controller->triggerReconnect();
     break;
   }
   case IP_EVENT_PPP_LOST_IP: {
@@ -208,6 +206,8 @@ bool UnifiedController::start()
              "No drivers configured! Please configure at least one for unified comms to work.");
     return false;
   }
+
+  vTaskDelay(pdMS_TO_TICKS(1000));
 
   ESP_LOGI(LOGTAG, "Started unified controller");
   if(!_createEventLoop()) {
@@ -274,13 +274,13 @@ void UnifiedController::connectBestDriver()
     EventBits_t bits = xEventGroupGetBits(ip_event_group);
     if(bits & driverBit) {
       ESP_LOGI(LOGTAG, "%.*s already connected", (int) driver->name.size(), driver->name.data());
-      bestDriver = driver; // <-- track who is already connected
+      bestDriver = driver;
       continue;
     }
 
     if(!driver->connect()) {
-      // Unable to connect
       ESP_LOGW(LOGTAG, "%.*s couldn't connect", (int) driver->name.size(), driver->name.data());
+      driver->disconnect();
       continue;
     }
 
@@ -304,23 +304,14 @@ void UnifiedController::disconnectUnselectedDrivers()
 {
   driver::Driver** current = _board_config->drivers;
 
-  // First clear all bits
-  xEventGroupClearBits(ip_event_group, PPP_IP_BIT | STA_IP_BIT | ETH_IP_BIT);
-
   while(current != nullptr && (*current) != nullptr) {
     auto driver = *current;
 
     if(driver == _selected_driver) {
-      // Keep the active driver's bit
-      EventBits_t bit = interfaceTypeToBit(driver->type);
-      if(bit != 0) {
-        xEventGroupSetBits(ip_event_group, bit);
-      }
       current++;
       continue;
     }
 
-    // Disconnect / deinit driver
     if(driver->isConfigured()) {
       bool success = driver->disconnect();
       if(!success) {
@@ -460,7 +451,7 @@ void UnifiedController::_ucTask(void* pvParameters)
       delay_ticks = pdMS_TO_TICKS(20 * 1000);
       break;
     case ReconnectTimer::LongPoll:
-      delay_ticks = pdMS_TO_TICKS(1 * 60 * 1000);
+      delay_ticks = pdMS_TO_TICKS(5 * 60 * 1000);
       break;
     default:
       delay_ticks = portMAX_DELAY;
