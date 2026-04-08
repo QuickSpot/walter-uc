@@ -45,6 +45,7 @@
 
 #include "espWifi.hpp"
 #include <cstring>
+#include <inttypes.h>
 #include <esp_log.h>
 #include <esp_netif_defaults.h>
 #include <esp_wifi.h>
@@ -153,7 +154,8 @@ void espWifi::printConfig()
   }
 }
 
-bool espWifi::configStation(std::string_view ssid, std::string_view pass, int priority)
+bool espWifi::configStation(std::string_view ssid, std::string_view pass, int priority,
+                            uint32_t connectionTimeout)
 {
   esp_err_t ret;
 
@@ -200,9 +202,10 @@ bool espWifi::configStation(std::string_view ssid, std::string_view pass, int pr
     return false;
 
   mode = STA;
-  config.staConfig.pass = pass;
-  config.staConfig.ssid = ssid;
-  Driver::priority = priority;
+  config.staConfig.pass       = pass;
+  config.staConfig.ssid       = ssid;
+  Driver::priority            = priority;
+  Driver::connectionTimeoutMs = connectionTimeout;
   configured = true;
   return true;
 }
@@ -243,8 +246,9 @@ bool espWifi::connect()
   // Start Wi-Fi; event handler will call esp_wifi_connect()
   esp_wifi_start();
 
+  ESP_LOGI(LOGTAG, "Waiting up to %" PRIu32 " ms for Wi-Fi association", connectionTimeoutMs);
   EventBits_t bits = xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                         pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
+                                         pdFALSE, pdFALSE, pdMS_TO_TICKS(connectionTimeoutMs));
 
   if(bits & WIFI_CONNECTED_BIT) {
     ESP_LOGI(LOGTAG, "Wi-Fi connected successfully");

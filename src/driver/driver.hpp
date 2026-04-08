@@ -91,7 +91,11 @@ protected:
   friend struct DriverComparator;
   friend class UnifiedController;
   esp_netif_t* network_interface;
-  int priority;
+  int      priority;
+
+  /** Maximum time to wait for an IP address after connect() returns true.
+   *  Defaults to 10 s; overridden by the driver-specific config() call. */
+  uint32_t connectionTimeoutMs = 10000;
 
 public:
   esp_event_loop_handle_t eventLoop = nullptr; // handle to the unifiedController eventLoop (filled
@@ -104,6 +108,16 @@ public:
    * @brief this function returns the configured driver priority or 0 when not configured
    */
   int getPriority() { return priority; }
+
+  /**
+   * @brief Returns the maximum time in milliseconds the unified controller will
+   * wait for this driver to obtain an IP address after calling connect().
+   *
+   * The default is 10 000 ms (10 s).  Slow links such as LTE-M/NB-IoT may
+   * need several minutes; fast links such as Wi-Fi are usually done in under
+   * 20 s.  The value is set via the driver-specific @c config() call.
+   */
+  uint32_t getConnectionTimeoutMs() const { return connectionTimeoutMs; }
 
   virtual esp_netif_t* getInterface() { return network_interface; };
 

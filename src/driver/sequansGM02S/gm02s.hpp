@@ -94,13 +94,16 @@ public:
   void printConfig() override;
 
   /**
-   * @brief this function configures the driver
+   * @brief Configure the driver.
    *
-   * @param[in] apn the apn to use.
-   * @param priority the driver priority (see netif route_prio)
-   * @param[in] dns_addr the address of the dns server to use.
+   * @param[in] apn               The APN to use.
+   * @param[in] priority          The driver priority (higher = preferred).
+   * @param[in] connectionTimeout Maximum time in milliseconds to wait for an
+   *                              IP address after the modem reports network
+   *                              registration.  Defaults to 10 000 ms (10 s).
    */
-  bool config(std::string_view apn, int priority) override;
+  bool config(std::string_view apn, int priority,
+              uint32_t connectionTimeout = 10000) override;
   bool isConfigured() override;
 
   /**
@@ -171,7 +174,7 @@ public:
   /**
    * @brief this function waits for a +CEREG:5 URC.
    */
-  esp_modem::command_result waitForConnection();
+  esp_modem::command_result waitForConnection(uint32_t timeoutMs);
 
   /**
    * @brief this modem returns the native modem instance (useful for accessing SQNGM02S specific

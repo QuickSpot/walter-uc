@@ -75,9 +75,17 @@ public:
   WifiDriver() { type = WIFI; }
 
   /**
-   * @brief configures the wifi driver.
+   * @brief Configure the Wi-Fi driver in station mode.
+   *
+   * @param[in] ssid              The SSID of the access point to join.
+   * @param[in] pass              The WPA2 passphrase.
+   * @param[in] priority          The driver priority (higher = preferred).
+   * @param[in] connectionTimeout Maximum time in milliseconds to wait for an
+   *                              IP address after the Wi-Fi link is up.
+   *                              Defaults to 10 000 ms (10 s).
    */
-  virtual bool configStation(std::string_view ssid, std::string_view pass, int priority) = 0;
+  virtual bool configStation(std::string_view ssid, std::string_view pass, int priority,
+                             uint32_t connectionTimeout = 10000) = 0;
 
   virtual void printIPInfo() = 0;
 };

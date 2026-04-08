@@ -365,8 +365,12 @@ void UnifiedController::connectBestDriver()
       continue;
     }
 
-    // Wait for IP on this driver's interface
-    bits = xEventGroupWaitBits(ip_event_group, driverBit, pdFALSE, pdTRUE, pdMS_TO_TICKS(10000));
+    // Wait for IP on this driver's interface (per-driver configurable timeout)
+    ESP_LOGI(LOGTAG, "%.*s waiting up to %" PRIu32 " ms for an IP",
+             (int) driver->name.size(), driver->name.data(),
+             driver->getConnectionTimeoutMs());
+    bits = xEventGroupWaitBits(ip_event_group, driverBit, pdFALSE, pdTRUE,
+                               pdMS_TO_TICKS(driver->getConnectionTimeoutMs()));
 
     if(bits & driverBit) {
       bestDriver = driver;

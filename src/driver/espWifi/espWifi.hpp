@@ -75,9 +75,17 @@ public:
   void printConfig() override;
 
   /**
-   * @brief configure the
+   * @brief Configure the driver in station mode.
+   *
+   * @param[in] ssid              SSID of the access point to join.
+   * @param[in] pass              WPA2 passphrase.
+   * @param[in] priority          Driver priority (higher = preferred).
+   * @param[in] connectionTimeout Maximum time in milliseconds to wait for an
+   *                              IP address after the Wi-Fi link comes up.
+   *                              Defaults to 10 000 ms (10 s).
    */
-  bool configStation(std::string_view ssid, std::string_view pass, int priority) override;
+  bool configStation(std::string_view ssid, std::string_view pass, int priority,
+                     uint32_t connectionTimeout = 10000) override;
 
   /**
    * @brief connect the ESP-WIFI driver to the network.

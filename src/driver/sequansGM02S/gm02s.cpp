@@ -45,6 +45,7 @@
 
 #include "gm02s.hpp"
 #include "lwip/ip_addr.h"
+#include <inttypes.h>
 #include <driver/gpio.h>
 #include <esp_modem_config.h>
 #include "esp_netif_ppp.h"
@@ -97,7 +98,7 @@ void gm02s::printConfig()
 }
 
 // Persistent configuration: called once at boot
-bool gm02s::config(std::string_view apn, int priority)
+bool gm02s::config(std::string_view apn, int priority, uint32_t connectionTimeout)
 {
   if(configured)
     return true;
@@ -142,7 +143,8 @@ bool gm02s::config(std::string_view apn, int priority)
   if(!_setupModemDCE())
     return false;
 
-  Driver::priority = priority;
+  Driver::priority            = priority;
+  Driver::connectionTimeoutMs = connectionTimeout;
   configured = true;
 
   return true;
@@ -165,7 +167,7 @@ bool gm02s::connect()
   if(res == esp_modem::command_result::FAIL)
     return false;
 
-  res = waitForConnection();
+  res = waitForConnection(connectionTimeoutMs);
   if(res != esp_modem::command_result::OK)
     return false;
 
@@ -267,10 +269,11 @@ esp_modem::command_result gm02s::command(const std::string& command,
       },
       timeout_ms);
 }
-esp_modem::command_result gm02s::waitForConnection()
+esp_modem::command_result gm02s::waitForConnection(uint32_t timeoutMs)
 {
   const auto pass = std::list<std::string_view>({ "+CEREG: 1", "+CEREG: 5" });
-  esp_modem::command_result res = command("", pass, {}, 30 * 1000);
+  ESP_LOGI(LOGTAG, "Waiting up to %" PRIu32 " ms for mobile network registration", timeoutMs);
+  esp_modem::command_result res = command("", pass, {}, static_cast<int>(timeoutMs));
   if(res == esp_modem::command_result::OK) {
     ESP_LOGI(LOGTAG, "Connected to mobile network");
   } else {
