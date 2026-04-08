@@ -158,4 +158,82 @@ public:
   bool operator()(driver::Driver* a, driver::Driver* b) const { return a->priority < b->priority; }
 };
 } // namespace driver
+
+/* =========================================================================
+ * Application-level network events (UC_NETWORK_EVENT_BASE)
+ * =========================================================================
+ *
+ * Subscribe to these events to be notified when any managed network
+ * interface gains or loses its IP address.  This is the recommended hook
+ * for (re)establishing sockets and protocol sessions after a driver switch.
+ *
+ * Registration example:
+ *
+ *   uc.controller.registerNetworkEventHandler(
+ *       UC_EVENT_NETWORK_UP,
+ *       [](void* arg, esp_event_base_t, int32_t, void* data) {
+ *           auto* e = static_cast<uc_network_event_t*>(data);
+ *           ESP_LOGI(TAG, "Network up on %s – IP " IPSTR,
+ *                    e->driver_name, IP2STR(&e->ip_info.ip));
+ *           // (Re)connect your sockets / MQTT / CoAP sessions here.
+ *       }, nullptr);
+ *
+ *   uc.controller.registerNetworkEventHandler(
+ *       UC_EVENT_NETWORK_DOWN,
+ *       [](void* arg, esp_event_base_t, int32_t, void* data) {
+ *           auto* e = static_cast<uc_network_event_t*>(data);
+ *           ESP_LOGW(TAG, "Network down on %s – closing sessions",
+ *                    e->driver_name);
+ *           // Close sockets / stop clients here.
+ *       }, nullptr);
+ */
+
+/**
+ * @brief Event base for application-level network-state notifications.
+ *
+ * Events are dispatched on the default ESP event loop so handlers can be
+ * registered with standard ESP-IDF APIs as well as via
+ * @c UnifiedController::registerNetworkEventHandler().
+ */
+ESP_EVENT_DECLARE_BASE(UC_NETWORK_EVENT_BASE);
+
+/**
+ * @brief Event IDs dispatched on @c UC_NETWORK_EVENT_BASE.
+ */
+enum uc_event_t : int32_t {
+  /** A managed interface obtained an IP address and is ready for use.
+   *  Event data: non-null pointer to @c uc_network_event_t. */
+  UC_EVENT_NETWORK_UP = 0,
+
+  /** A managed interface lost its IP address.  Re-establish any open
+   *  sockets or protocol sessions before using the network again.
+   *  Event data: pointer to @c uc_network_event_t; only
+   *  @c interface_type and @c driver_name are valid on DOWN events. */
+  UC_EVENT_NETWORK_DOWN = 1,
+};
+
+/**
+ * @brief Payload carried by @c UC_NETWORK_EVENT_BASE events.
+ *
+ * The struct is stack-allocated inside the event dispatch path; the
+ * pointer is only valid for the duration of the callback invocation.
+ * Copy any fields you need to retain beyond the callback.
+ */
+struct uc_network_event_t {
+  /** The interface type that changed state. */
+  driver::InterfaceType interface_type;
+
+  /** Human-readable driver name (null-terminated). */
+  const char* driver_name;
+
+  /** IP configuration assigned to the interface (UP only). */
+  esp_netif_ip_info_t ip_info;
+
+  /** Primary DNS server address (UP only). */
+  esp_ip4_addr_t dns_main;
+
+  /** Secondary / backup DNS server address (UP only). */
+  esp_ip4_addr_t dns_backup;
+};
+
 #endif

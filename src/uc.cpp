@@ -50,6 +50,8 @@
 #include <esp_netif.h>
 #include <esp_log.h>
 
+ESP_EVENT_DEFINE_BASE(UC_NETWORK_EVENT_BASE);
+
 #define PPP_IP_BIT (1 << 0)
 #define STA_IP_BIT (1 << 1)
 #define ETH_IP_BIT (1 << 2)
@@ -90,20 +92,32 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
 
     ip_event_got_ip_t* event = (ip_event_got_ip_t*) data;
     esp_netif_t* netif = event->esp_netif;
-    esp_netif_dns_info_t dns_info;
-    esp_netif_get_dns_info(netif, (esp_netif_dns_type_t) 0, &dns_info);
-    esp_netif_get_dns_info(netif, (esp_netif_dns_type_t) 1, &dns_info);
+
+    esp_netif_dns_info_t dns_main   = {};
+    esp_netif_dns_info_t dns_backup = {};
+    esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN,   &dns_main);
+    esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dns_backup);
 
     ESP_LOGI(LOGTAG, "Station received IP address");
     ESP_LOGI(LOGTAG, "~~~~~~~~~~~~~~");
     ESP_LOGI(LOGTAG, "IP          : " IPSTR, IP2STR(&event->ip_info.ip));
     ESP_LOGI(LOGTAG, "Netmask     : " IPSTR, IP2STR(&event->ip_info.netmask));
     ESP_LOGI(LOGTAG, "Gateway     : " IPSTR, IP2STR(&event->ip_info.gw));
-    ESP_LOGI(LOGTAG, "Name Server1: " IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
-    ESP_LOGI(LOGTAG, "Name Server2: " IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
+    ESP_LOGI(LOGTAG, "Name Server1: " IPSTR, IP2STR(&dns_main.ip.u_addr.ip4));
+    ESP_LOGI(LOGTAG, "Name Server2: " IPSTR, IP2STR(&dns_backup.ip.u_addr.ip4));
     ESP_LOGI(LOGTAG, "~~~~~~~~~~~~~~");
 
     xEventGroupSetBits(ip_event_group, STA_IP_BIT);
+
+    uc_network_event_t net_event = {
+      .interface_type = driver::WIFI,
+      .driver_name    = "Espressif WiFi",
+      .ip_info        = event->ip_info,
+      .dns_main       = dns_main.ip.u_addr.ip4,
+      .dns_backup     = dns_backup.ip.u_addr.ip4,
+    };
+    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_UP,
+                   &net_event, sizeof(net_event), portMAX_DELAY);
     break;
   }
   case IP_EVENT_STA_LOST_IP: {
@@ -111,8 +125,18 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
       break;
 
     ESP_LOGW(LOGTAG, "Station lost IP address");
-
     xEventGroupClearBits(ip_event_group, STA_IP_BIT);
+
+    uc_network_event_t net_event = {
+      .interface_type = driver::WIFI,
+      .driver_name    = "Espressif WiFi",
+      .ip_info        = {},
+      .dns_main       = {},
+      .dns_backup     = {},
+    };
+    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                   &net_event, sizeof(net_event), portMAX_DELAY);
+
     controller->triggerReconnect();
     break;
   }
@@ -128,9 +152,34 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
     if(bits & ETH_IP_BIT)
       break;
 
-    ESP_LOGW(LOGTAG, "Ethernet received IP address");
+    ip_event_got_ip_t* event = (ip_event_got_ip_t*) data;
+    esp_netif_t* netif = event->esp_netif;
+
+    esp_netif_dns_info_t dns_main   = {};
+    esp_netif_dns_info_t dns_backup = {};
+    esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN,   &dns_main);
+    esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dns_backup);
+
+    ESP_LOGI(LOGTAG, "Ethernet received IP address");
+    ESP_LOGI(LOGTAG, "~~~~~~~~~~~~~~");
+    ESP_LOGI(LOGTAG, "IP          : " IPSTR, IP2STR(&event->ip_info.ip));
+    ESP_LOGI(LOGTAG, "Netmask     : " IPSTR, IP2STR(&event->ip_info.netmask));
+    ESP_LOGI(LOGTAG, "Gateway     : " IPSTR, IP2STR(&event->ip_info.gw));
+    ESP_LOGI(LOGTAG, "Name Server1: " IPSTR, IP2STR(&dns_main.ip.u_addr.ip4));
+    ESP_LOGI(LOGTAG, "Name Server2: " IPSTR, IP2STR(&dns_backup.ip.u_addr.ip4));
+    ESP_LOGI(LOGTAG, "~~~~~~~~~~~~~~");
 
     xEventGroupSetBits(ip_event_group, ETH_IP_BIT);
+
+    uc_network_event_t net_event = {
+      .interface_type = driver::ETHERNET,
+      .driver_name    = "Ethernet",
+      .ip_info        = event->ip_info,
+      .dns_main       = dns_main.ip.u_addr.ip4,
+      .dns_backup     = dns_backup.ip.u_addr.ip4,
+    };
+    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_UP,
+                   &net_event, sizeof(net_event), portMAX_DELAY);
     break;
   }
   case IP_EVENT_ETH_LOST_IP: {
@@ -138,8 +187,18 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
       break;
 
     ESP_LOGW(LOGTAG, "Ethernet lost IP address");
-
     xEventGroupClearBits(ip_event_group, ETH_IP_BIT);
+
+    uc_network_event_t net_event = {
+      .interface_type = driver::ETHERNET,
+      .driver_name    = "Ethernet",
+      .ip_info        = {},
+      .dns_main       = {},
+      .dns_backup     = {},
+    };
+    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                   &net_event, sizeof(net_event), portMAX_DELAY);
+
     controller->triggerReconnect();
     break;
   }
@@ -149,29 +208,51 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
 
     ip_event_got_ip_t* event = (ip_event_got_ip_t*) data;
     esp_netif_t* netif = event->esp_netif;
-    esp_netif_dns_info_t dns_info;
-    esp_netif_get_dns_info(netif, (esp_netif_dns_type_t) 0, &dns_info);
-    esp_netif_get_dns_info(netif, (esp_netif_dns_type_t) 1, &dns_info);
 
-    ESP_LOGI(LOGTAG, "PPP Interface received IP address");
+    esp_netif_dns_info_t dns_main   = {};
+    esp_netif_dns_info_t dns_backup = {};
+    esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN,   &dns_main);
+    esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dns_backup);
+
+    ESP_LOGI(LOGTAG, "PPP interface received IP address");
     ESP_LOGI(LOGTAG, "~~~~~~~~~~~~~~");
     ESP_LOGI(LOGTAG, "IP          : " IPSTR, IP2STR(&event->ip_info.ip));
     ESP_LOGI(LOGTAG, "Netmask     : " IPSTR, IP2STR(&event->ip_info.netmask));
     ESP_LOGI(LOGTAG, "Gateway     : " IPSTR, IP2STR(&event->ip_info.gw));
-    ESP_LOGI(LOGTAG, "Name Server1: " IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
-    ESP_LOGI(LOGTAG, "Name Server2: " IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
+    ESP_LOGI(LOGTAG, "Name Server1: " IPSTR, IP2STR(&dns_main.ip.u_addr.ip4));
+    ESP_LOGI(LOGTAG, "Name Server2: " IPSTR, IP2STR(&dns_backup.ip.u_addr.ip4));
     ESP_LOGI(LOGTAG, "~~~~~~~~~~~~~~");
 
     xEventGroupSetBits(ip_event_group, PPP_IP_BIT);
+
+    uc_network_event_t net_event = {
+      .interface_type = driver::CELLULAR,
+      .driver_name    = "Sequans Monarch Modem",
+      .ip_info        = event->ip_info,
+      .dns_main       = dns_main.ip.u_addr.ip4,
+      .dns_backup     = dns_backup.ip.u_addr.ip4,
+    };
+    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_UP,
+                   &net_event, sizeof(net_event), portMAX_DELAY);
     break;
   }
   case IP_EVENT_PPP_LOST_IP: {
     if(!(bits & PPP_IP_BIT))
       break;
 
-    ESP_LOGW(LOGTAG, "PPP Interface lost IP address");
-
+    ESP_LOGW(LOGTAG, "PPP interface lost IP address");
     xEventGroupClearBits(ip_event_group, PPP_IP_BIT);
+
+    uc_network_event_t net_event = {
+      .interface_type = driver::CELLULAR,
+      .driver_name    = "Sequans Monarch Modem",
+      .ip_info        = {},
+      .dns_main       = {},
+      .dns_backup     = {},
+    };
+    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                   &net_event, sizeof(net_event), portMAX_DELAY);
+
     controller->triggerReconnect();
     break;
   }
@@ -329,6 +410,13 @@ esp_err_t UnifiedController::registerEventHandler(driver::EventType event_id,
                                                   void* event_handler_arg)
 {
   return esp_event_handler_register(UC_DRIVER_BASE, event_id, event_handler, event_handler_arg);
+}
+
+esp_err_t UnifiedController::registerNetworkEventHandler(uc_event_t event_id,
+                                                         esp_event_handler_t handler,
+                                                         void* handler_arg)
+{
+  return esp_event_handler_register(UC_NETWORK_EVENT_BASE, event_id, handler, handler_arg);
 }
 
 void UnifiedController::_sortDrivers()

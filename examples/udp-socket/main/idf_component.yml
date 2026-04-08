@@ -3,7 +3,7 @@ dependencies:
     version: ">=5.4.0"
 
   dptechnics/walter-uc:
-    version: ">=0.1.0"
+    version: ">=0.2.0"
 
   # For local development:
   # walter-uc:

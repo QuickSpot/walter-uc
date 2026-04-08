@@ -6,9 +6,9 @@ dependencies:
     git: https://github.com/bluecherry/bluecherry-esp-idf
     version: "V1.3.3"
 
-  # dptechnics/walter-uc:
-  #   version: ">=0.1.0"
+  dptechnics/walter-uc:
+    version: ">=0.2.0"
 
   # For local development:
-  walter-uc:
-    path: ../../../
+  # walter-uc:
+  #   path: ../../../

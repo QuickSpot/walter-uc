@@ -1,13 +1,15 @@
 /**
- * @file main.cpp
- * @author Daan Pape <daan@dptechnics.com>, Arnoud Devoogdt <arnoud@dptechnics.com>, Robbe Beernaert
- * @date 21 Aug 2025
- * @copyright DPTechnics bv
- * @brief Walter unified comms library examples
+ * @file main.c
+ * @author Daan Pape (daan@dptechnics.com)
+ * @author Arnoud Devoogdt (arnoud@dptechnics.com)
+ * @version 0.2.0
+ * @date 2026-04-08
+ * @copyright Copyright (c) 2026 DPTechnics BV (info@dptechnics.com)
+ * @brief This code connects to an MQTT platform using the walter-uc library.
  *
  * @section LICENSE
  *
- * Copyright (C) 2025, DPTechnics bv
+ * Copyright (C) 2026, DPTechnics bv
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -43,18 +45,34 @@
  *
  * @section DESCRIPTION
  *
- * This program sets up the Unified comms and connects to a cloud MQTT service.
+ * This example demonstrates event-driven MQTT session management with walter-uc.
+ *
+ * The UC_EVENT_NETWORK_UP callback starts (or restarts) the MQTT client once an
+ * IP address has been assigned.  UC_EVENT_NETWORK_DOWN stops the MQTT client so
+ * the session is torn down cleanly before the underlying interface changes.
+ *
+ * Notification bit assignments (FreeRTOS task notifications):
+ *   Bit 0 (NET_UP_BIT)   – network interface up, IP assigned, MQTT may start.
+ *   Bit 1 (NET_DOWN_BIT) – network interface down, stop MQTT client.
  */
 
 #include "mqtt_client.h"
 #include <bsp/walter.hpp>
 #include <netif/ppp/ppp.h>
 
-static bool mqtt_connected = false;
-
 static const char* TAG = "UC_MQTT";
 
-static esp_mqtt_client_handle_t client = nullptr;
+/** Bit set when a network interface comes up and is ready for use. */
+#define NET_UP_BIT   (1UL << 0)
+
+/** Bit set when the active network interface has lost its IP address. */
+#define NET_DOWN_BIT (1UL << 1)
+
+/** Handle used by event callbacks to wake the main task. */
+static TaskHandle_t s_main_task = nullptr;
+
+static bool                     mqtt_connected = false;
+static esp_mqtt_client_handle_t client         = nullptr;
 
 static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id,
                                void* event_data)
@@ -65,9 +83,9 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
   case MQTT_EVENT_CONNECTED:
     ESP_LOGI(TAG, "MQTT connected");
     {
-      const char* topic = "walter-mqtt-test-topic";
+      const char* topic   = "walter-mqtt-test-topic";
       const char* message = "Hello from Walter device!";
-      int msg_id = esp_mqtt_client_publish(client, topic, message, 0, 1, 0);
+      int         msg_id  = esp_mqtt_client_publish(client, topic, message, 0, 1, 0);
       ESP_LOGI(TAG, "Published message with id: %d", msg_id);
     }
     mqtt_connected = true;
@@ -91,41 +109,94 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
   }
 }
 
+/**
+ * @brief UC network event handler – runs in the default event-loop task.
+ *
+ * On UC_EVENT_NETWORK_UP:   notify the main task so it (re)starts the MQTT
+ *                           client on the newly available interface.
+ * On UC_EVENT_NETWORK_DOWN: notify the main task so it stops the MQTT
+ *                           client cleanly before the interface disappears.
+ */
+static void uc_network_event_handler(void* arg, esp_event_base_t base,
+                                     int32_t event_id, void* event_data)
+{
+  uc_network_event_t* e = static_cast<uc_network_event_t*>(event_data);
+
+  if(event_id == UC_EVENT_NETWORK_UP) {
+    ESP_LOGI(TAG, "Network UP  – driver: %s, IP: " IPSTR,
+             e->driver_name, IP2STR(&e->ip_info.ip));
+
+    if(s_main_task) {
+      xTaskNotify(s_main_task, NET_UP_BIT, eSetBits);
+    }
+  } else if(event_id == UC_EVENT_NETWORK_DOWN) {
+    ESP_LOGW(TAG, "Network DOWN – driver: %s – stopping MQTT client", e->driver_name);
+
+    if(s_main_task) {
+      xTaskNotify(s_main_task, NET_DOWN_BIT, eSetBits);
+    }
+  }
+}
+
 extern "C" void app_main(void)
 {
-  ESP_LOGI(TAG, "Unified Comms MQTT example V1.0.0");
+  ESP_LOGI(TAG, "Unified Comms MQTT example V0.2.0");
+
+  /* Store the task handle before registering handlers so callbacks can
+   * safely notify it as soon as start() makes the first connection. */
+  s_main_task = xTaskGetCurrentTaskHandle();
 
   CELL_DRV(uc.GM02S)->config("CELL-APN", 6);
   WIFI_DRV(uc.ESP_WIFI)->configStation("WIFI-SSID", "WIFI-PASSWORD", 5);
 
-  if(uc.controller.start()) {
-    ESP_LOGI(TAG, "Succesfully started unified comms");
-  } else {
-    ESP_LOGE(TAG, "Could not start unified comms / connect a driver");
+  /* Register UC network event handlers before calling start() so that the
+   * very first UC_EVENT_NETWORK_UP event is not missed. */
+  uc.controller.registerNetworkEventHandler(UC_EVENT_NETWORK_UP,   uc_network_event_handler, nullptr);
+  uc.controller.registerNetworkEventHandler(UC_EVENT_NETWORK_DOWN, uc_network_event_handler, nullptr);
+
+  if(!uc.controller.start()) {
+    ESP_LOGE(TAG, "Could not start unified comms – halting");
+    return;
   }
 
-  vTaskDelay(pdMS_TO_TICKS(5000));
-
-  esp_mqtt_client_config_t mqtt_cfg = {};
-  mqtt_cfg.broker.address.uri = "mqtt://broker.hivemq.com:1883";
-
-  client = esp_mqtt_client_init(&mqtt_cfg);
-
-  // Register event handler for all MQTT events
-  esp_mqtt_client_register_event(client, esp_mqtt_event_id_t::MQTT_EVENT_ANY, mqtt_event_handler,
-                                 nullptr);
-
-  esp_mqtt_client_start(client);
+  /* Create the MQTT client once; it will be started/stopped in response to
+   * network events rather than after an arbitrary delay. */
+  esp_mqtt_client_config_t mqtt_cfg   = {};
+  mqtt_cfg.broker.address.uri         = "mqtt://broker.hivemq.com:1883";
+  client                              = esp_mqtt_client_init(&mqtt_cfg);
+  esp_mqtt_client_register_event(client, esp_mqtt_event_id_t::MQTT_EVENT_ANY,
+                                 mqtt_event_handler, nullptr);
 
   while(true) {
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    /* ------------------------------------------------------------------ *
+     * Suspend until the UC event handler sends a notification.           *
+     * Using portMAX_DELAY avoids a busy-wait; the task is only woken     *
+     * when the network state actually changes.                           *
+     * ------------------------------------------------------------------ */
+    uint32_t notif = 0;
+    xTaskNotifyWait(0, ULONG_MAX, &notif, portMAX_DELAY);
+
+    /* Process DOWN before UP so a rapid DOWN → UP pair results in a clean
+     * client restart. */
+    if(notif & NET_DOWN_BIT) {
+      if(mqtt_connected || client) {
+        ESP_LOGI(TAG, "Stopping MQTT client due to network loss");
+        esp_mqtt_client_stop(client);
+        mqtt_connected = false;
+      }
+    }
+
+    if(notif & NET_UP_BIT) {
+      ESP_LOGI(TAG, "Starting MQTT client");
+      esp_mqtt_client_start(client);
+    }
+
+    /* Publish a keep-alive message if the MQTT session is active. */
     if(mqtt_connected) {
-      const char* topic = "walter-mqtt-test-topic";
+      const char* topic   = "walter-mqtt-test-topic";
       const char* message = "Hello again from Walter!";
-      int msg_id = esp_mqtt_client_publish(client, topic, message, 0, 1, 0);
+      int         msg_id  = esp_mqtt_client_publish(client, topic, message, 0, 1, 0);
       ESP_LOGI(TAG, "Published in loop, msg_id=%d", msg_id);
-    } else {
-      ESP_LOGW(TAG, "MQTT not connected, skipping publish");
     }
   }
 }
