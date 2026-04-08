@@ -132,7 +132,7 @@ extern "C" void app_main(void)
   ESP_LOGI(TAG, "Unified Comms BlueCherry example V1.0.0");
 
   CELL_DRV(uc.GM02S)->config("CELL-APN", 6);
-  WIFI_DRV(uc.ESP_WIFI)->configStation("WIFI-SSID", "WIFI-PASSWORD", 5);
+  WIFI_DRV(uc.ESP_WIFI)->configStation("Tell My Wi-Fi I Love Her", "DEVARN12", 5);
 
   if(uc.controller.start()) {
     ESP_LOGI(TAG, "Succesfully started unified comms");

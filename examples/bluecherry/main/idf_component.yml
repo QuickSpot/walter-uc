@@ -4,11 +4,11 @@ dependencies:
 
   bluecherry/bluecherry:
     git: https://github.com/bluecherry/bluecherry-esp-idf
-    version: ">=1.3.0"
+    version: "V1.3.3"
 
-  dptechnics/walter-uc:
-    version: ">=0.1.0"
+  # dptechnics/walter-uc:
+  #   version: ">=0.1.0"
 
   # For local development:
-  # walter-uc:
-  #   path: ../../../
+  walter-uc:
+    path: ../../../

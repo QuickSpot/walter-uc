@@ -58,6 +58,9 @@
 
 static int s_retry_num = 0;
 
+static bool wifi_event_loop_already_initialized = false;
+static bool wifi_already_initialized = false;
+
 EventGroupHandle_t wifi_event_group;
 driver::wifi::espWifi* router;
 
@@ -176,10 +179,12 @@ bool espWifi::configStation(std::string_view ssid, std::string_view pass, int pr
 
   // Event loop could have already been initialized
   ret = esp_event_loop_create_default();
-  if(ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
+  if(ret == ESP_ERR_INVALID_STATE) {
+    wifi_event_loop_already_initialized = true;
+  } else if(ret != ESP_OK) {
     ESP_LOGE(LOGTAG, "esp_event_loop_create_default() fail");
-  if(ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
     return false;
+  }
 
   // network_interface = esp_netif_create_default_wifi_sta();
   if(!_setupNetif(priority)) {
@@ -208,7 +213,13 @@ bool espWifi::connect()
     return false;
 
   wifi_init_config_t initProps = WIFI_INIT_CONFIG_DEFAULT();
-  ESP_ERROR_CHECK(esp_wifi_init(&initProps));
+  esp_err_t ret = esp_wifi_init(&initProps);
+  if(ret == ESP_ERR_WIFI_INIT_STATE) {
+    wifi_already_initialized = true;
+  } else if(ret != ESP_OK) {
+    ESP_LOGE(LOGTAG, "Failed to initialize WiFi: %s", esp_err_to_name(ret));
+    return false;
+  }
 
   wifi_config_t wifiConfig = {};
   wifiConfig.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
@@ -219,11 +230,18 @@ bool espWifi::connect()
   std::memcpy(wifiConfig.sta.password, config.staConfig.pass.data(),
               std::min(config.staConfig.pass.size(), sizeof(wifiConfig.sta.password) - 1));
 
-  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifiConfig));
+  wifi_mode_t mode;
+  esp_wifi_get_mode(&mode);
+  if(mode == WIFI_MODE_AP) {
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+  } else if(mode != WIFI_MODE_APSTA) {
+    esp_wifi_set_mode(WIFI_MODE_STA);
+  }
+
+  esp_wifi_set_config(WIFI_IF_STA, &wifiConfig);
 
   // Start Wi-Fi; event handler will call esp_wifi_connect()
-  ESP_ERROR_CHECK(esp_wifi_start());
+  esp_wifi_start();
 
   EventBits_t bits = xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                          pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
@@ -240,20 +258,31 @@ bool espWifi::connect()
 
 bool espWifi::disconnect()
 {
-  if(!configured)
-    return false;
-
-  // Cleanly disconnect + stop Wi-Fi
   esp_wifi_disconnect();
-  esp_wifi_stop();
 
-  // Deinit Wi-Fi driver to free memory
-  esp_wifi_deinit();
+  wifi_mode_t mode;
+  if(esp_wifi_get_mode(&mode) != ESP_OK) {
+    ESP_LOGE(LOGTAG, "Failed to get Wi-Fi mode");
+    return false;
+  }
 
-  // Clear event bits
-  xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_STARTED_BIT);
+  switch(mode) {
+  case WIFI_MODE_STA:
+    // Only STA active → disable it by setting NULL
+    ESP_LOGI(LOGTAG, "Disabling STA mode, no AP configured");
+    esp_wifi_set_mode(WIFI_MODE_NULL);
+    break;
 
-  ESP_LOGI(LOGTAG, "Wi-Fi stopped successfully");
+  case WIFI_MODE_APSTA:
+    // AP + STA active → disable STA but keep AP
+    ESP_LOGI(LOGTAG, "Disabling STA mode, keeping AP active");
+    esp_wifi_set_mode(WIFI_MODE_AP);
+    break;
+
+  default:
+    break;
+  }
+
   return true;
 }
 
