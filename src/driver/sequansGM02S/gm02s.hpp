@@ -95,15 +95,12 @@ public:
 
   /**
    * @brief Configure the driver.
+    * Driver policy (priority, timeout and internet-check requirement) is
+    * configured through the CELL_DRV macro.
    *
-   * @param[in] apn               The APN to use.
-   * @param[in] priority          The driver priority (higher = preferred).
-   * @param[in] connectionTimeout Maximum time in milliseconds to wait for an
-   *                              IP address after the modem reports network
-   *                              registration.  Defaults to 10 000 ms (10 s).
+    * @param[in] apn The APN to use.
    */
-  bool config(std::string_view apn, int priority,
-              uint32_t connectionTimeout = 10000) override;
+    bool config(std::string_view apn) override;
   bool isConfigured() override;
 
   /**

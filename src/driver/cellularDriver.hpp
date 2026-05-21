@@ -71,19 +71,12 @@ public:
 
   /**
    * @brief Configure the cellular driver.
+    * Driver policy (priority, timeout and internet-check requirement) is
+    * configured through the CELL_DRV macro.
    *
-   * @param[in] apn               The APN to connect to.
-   * @param[in] priority          The driver priority (higher = preferred).
-   * @param[in] connectionTimeout Maximum time in milliseconds to wait for an
-   *                              IP address after the modem reports network
-   *                              registration.  LTE-M/NB-IoT networks can
-   *                              take several minutes to assign an address;
-   *                              600 000 ms (10 min) is a safe upper bound
-   *                              for difficult coverage areas.
-   *                              Defaults to 10 000 ms (10 s).
+    * @param[in] apn The APN to connect to.
    */
-  virtual bool config(std::string_view apn, int priority,
-                      uint32_t connectionTimeout = 10000) = 0;
+    virtual bool config(std::string_view apn) = 0;
 
   /**
    * @brief Execute the supplied AT command

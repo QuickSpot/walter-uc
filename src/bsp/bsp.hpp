@@ -91,7 +91,9 @@
 #define MEMBER(x) .x = &x
 #define MEMBERS(...) FOR_EACH(MEMBER, __VA_ARGS__)
 
-#define CELL_DRV(cellularDriver) ((driver::cellular::CellularDriver*) cellularDriver)
+#define CELL_DRV(cellularDriver, priority, timeoutSeconds, requireInternetCheck)               \
+  ((cellularDriver)->applySelectionPolicy((priority), (timeoutSeconds), (requireInternetCheck)), \
+   static_cast<driver::cellular::CellularDriver*>(cellularDriver))
 
 // --- BSP(Board Support) ---
 

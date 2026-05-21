@@ -164,8 +164,8 @@ extern "C" void app_main(void)
    * can safely notify it the moment start() triggers the first connection. */
   s_main_task = xTaskGetCurrentTaskHandle();
 
-  CELL_DRV(uc.GM02S)->config("CELL-APN", 6, 600000);    // 600 s timeout for cellular
-  WIFI_DRV(uc.ESP_WIFI)->configStation("WIFI-SSID", "WIFI-PASSWORD", 5, 20000); // 20 s timeout for Wi-Fi
+  CELL_DRV(uc.GM02S, 6, 600, false)->config("CELL-APN");
+  WIFI_DRV(uc.ESP_WIFI, 5, 20, true)->configStation("WIFI-SSID", "WIFI-PASSWORD");
 
   /* Register UC network event handlers before calling start() so that the
    * very first UC_EVENT_NETWORK_UP event is not missed. */

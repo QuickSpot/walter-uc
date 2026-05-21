@@ -1,8 +1,5 @@
 version: "0.2.0"
 name: "walter-uc"
 dependencies:
-  espressif/esp_modem:
-    git: "https://github.com/espressif/esp-protocols"
-    path: "components/esp_modem"
-    version: "master"
+  espressif/esp_modem: "*"
 description: "Walter Unified Communications Library"

@@ -102,9 +102,10 @@ public:
   /**
    * @brief Register an application-level network state event handler.
    *
-   * Handlers are invoked on the default event loop whenever a managed
-   * interface gains (@c UC_EVENT_NETWORK_UP) or loses (@c UC_EVENT_NETWORK_DOWN)
-   * its IP address.  The event data pointer is a @c uc_network_event_t.
+    * Handlers are invoked on the default event loop when the selected
+    * interface becomes usable (@c UC_EVENT_NETWORK_UP) or is lost
+    * (@c UC_EVENT_NETWORK_DOWN). The event data pointer is a
+    * @c uc_network_event_t.
    *
    * This is the recommended way for the application layer to detect driver
    * switches and to know when it is safe to (re)open sockets or protocol
@@ -119,6 +120,22 @@ public:
    */
   esp_err_t registerNetworkEventHandler(uc_event_t event_id, esp_event_handler_t handler,
                                         void* handler_arg = nullptr);
+
+  /**
+   * @brief Returns true when the given interface requires internet validation
+   * before UC_EVENT_NETWORK_UP is emitted.
+   */
+  bool requiresInternetCheck(driver::InterfaceType type) const;
+
+  /**
+   * @brief Returns true when the currently selected driver matches @p type.
+   */
+  bool isSelectedDriverType(driver::InterfaceType type) const;
+
+  /**
+   * @brief Clears the selected driver when it matches the supplied type.
+   */
+  void clearSelectedDriverIfType(driver::InterfaceType type);
 
   /**
    * @brief instantly trigger a reconnection logic and set the poll interval to short

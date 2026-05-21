@@ -47,12 +47,16 @@
 #ifndef _WIFI_DRIVER_
 #define _WIFI_DRIVER_
 #include "driver.hpp"
-#define WIFI_DRV(wifiDriver) ((driver::wifi::WifiDriver*) wifiDriver)
 
 /**
  * @brief The namespace for all wifi driver related code.
  */
 namespace driver::wifi {
+
+#define WIFI_DRV(wifiDriver, priority, timeoutSeconds, requireInternetCheck)                   \
+  ((wifiDriver)->applySelectionPolicy((priority), (timeoutSeconds), (requireInternetCheck)),   \
+   static_cast<driver::wifi::WifiDriver*>(wifiDriver))
+
 /**
  * @brief this denum defines the possible modes for wifi to be configured.
  */
@@ -77,15 +81,13 @@ public:
   /**
    * @brief Configure the Wi-Fi driver in station mode.
    *
-   * @param[in] ssid              The SSID of the access point to join.
-   * @param[in] pass              The WPA2 passphrase.
-   * @param[in] priority          The driver priority (higher = preferred).
-   * @param[in] connectionTimeout Maximum time in milliseconds to wait for an
-   *                              IP address after the Wi-Fi link is up.
-   *                              Defaults to 10 000 ms (10 s).
+    * Driver policy (priority, timeout and internet-check requirement) is
+    * configured through the WIFI_DRV macro.
+    *
+    * @param[in] ssid The SSID of the access point to join.
+    * @param[in] pass The WPA2 passphrase.
    */
-  virtual bool configStation(std::string_view ssid, std::string_view pass, int priority,
-                             uint32_t connectionTimeout = 10000) = 0;
+    virtual bool configStation(std::string_view ssid, std::string_view pass) = 0;
 
   virtual void printIPInfo() = 0;
 };

@@ -98,7 +98,7 @@ void gm02s::printConfig()
 }
 
 // Persistent configuration: called once at boot
-bool gm02s::config(std::string_view apn, int priority, uint32_t connectionTimeout)
+bool gm02s::config(std::string_view apn)
 {
   if(configured)
     return true;
@@ -126,7 +126,7 @@ bool gm02s::config(std::string_view apn, int priority, uint32_t connectionTimeou
   }
 
   // Setup persistent network interface
-  if(!_setupNetif(priority))
+  if(!_setupNetif(getPriority()))
     return false;
 
   // Setup persistent UART DTE (hardware interface)
@@ -143,8 +143,6 @@ bool gm02s::config(std::string_view apn, int priority, uint32_t connectionTimeou
   if(!_setupModemDCE())
     return false;
 
-  Driver::priority            = priority;
-  Driver::connectionTimeoutMs = connectionTimeout;
   configured = true;
 
   return true;
@@ -167,7 +165,7 @@ bool gm02s::connect()
   if(res == esp_modem::command_result::FAIL)
     return false;
 
-  res = waitForConnection(connectionTimeoutMs);
+  res = waitForConnection(getConnectionTimeoutSeconds() * 1000);
   if(res != esp_modem::command_result::OK)
     return false;
 

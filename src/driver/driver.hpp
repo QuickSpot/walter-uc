@@ -91,11 +91,14 @@ protected:
   friend struct DriverComparator;
   friend class UnifiedController;
   esp_netif_t* network_interface;
-  int      priority;
+  int      priority = 0;
 
-  /** Maximum time to wait for an IP address after connect() returns true.
-   *  Defaults to 10 s; overridden by the driver-specific config() call. */
-  uint32_t connectionTimeoutMs = 10000;
+  /** Maximum time to wait for connection/IP checks.
+   *  Defaults to 10 s and is configured by CELL_DRV/WIFI_DRV. */
+  uint32_t connectionTimeoutSeconds = 10;
+
+  /** True when the driver must pass an internet reachability check before selection. */
+  bool requireInternetCheck = false;
 
 public:
   esp_event_loop_handle_t eventLoop = nullptr; // handle to the unifiedController eventLoop (filled
@@ -110,14 +113,31 @@ public:
   int getPriority() { return priority; }
 
   /**
-   * @brief Returns the maximum time in milliseconds the unified controller will
-   * wait for this driver to obtain an IP address after calling connect().
+   * @brief Returns the maximum time in seconds the unified controller will
+   * wait for this driver during selection checks.
    *
-   * The default is 10 000 ms (10 s).  Slow links such as LTE-M/NB-IoT may
-   * need several minutes; fast links such as Wi-Fi are usually done in under
-   * 20 s.  The value is set via the driver-specific @c config() call.
+   * The default is 10 s. Slow links such as LTE-M/NB-IoT may need several
+   * minutes; fast links such as Wi-Fi are usually done in under 20 s.
+   * The value is set via CELL_DRV/WIFI_DRV.
    */
-  uint32_t getConnectionTimeoutMs() const { return connectionTimeoutMs; }
+  uint32_t getConnectionTimeoutSeconds() const { return connectionTimeoutSeconds; }
+
+  /**
+   * @brief Returns true if this interface requires an internet reachability
+   * check before being selected.
+   */
+  bool requiresInternetCheck() const { return requireInternetCheck; }
+
+  /**
+   * @brief Apply interface selection policy configured by CELL_DRV/WIFI_DRV.
+   */
+  void applySelectionPolicy(int policyPriority, uint32_t timeoutSeconds,
+                            bool mustHaveInternet)
+  {
+    priority = policyPriority;
+    connectionTimeoutSeconds = timeoutSeconds;
+    requireInternetCheck = mustHaveInternet;
+  }
 
   virtual esp_netif_t* getInterface() { return network_interface; };
 

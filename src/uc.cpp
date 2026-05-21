@@ -49,6 +49,10 @@
 #include <esp_event.h>
 #include <esp_netif.h>
 #include <esp_log.h>
+#include <ping/ping_sock.h>
+#include <lwip/ip_addr.h>
+#include <lwip/inet.h>
+#include <freertos/semphr.h>
 
 ESP_EVENT_DEFINE_BASE(UC_NETWORK_EVENT_BASE);
 
@@ -73,6 +77,169 @@ EventBits_t interfaceTypeToBit(driver::InterfaceType type)
 }
 
 namespace {
+constexpr const char* INTERNET_PING_TARGET = "8.8.8.8";
+
+struct PingContext {
+  SemaphoreHandle_t done;
+  bool success;
+};
+
+static void _on_ping_success(esp_ping_handle_t hdl, void* args)
+{
+  (void) hdl;
+  PingContext* ctx = static_cast<PingContext*>(args);
+  if(ctx != nullptr) {
+    ctx->success = true;
+  }
+}
+
+static void _on_ping_end(esp_ping_handle_t hdl, void* args)
+{
+  (void) hdl;
+  PingContext* ctx = static_cast<PingContext*>(args);
+  if(ctx != nullptr && ctx->done != nullptr) {
+    xSemaphoreGive(ctx->done);
+  }
+}
+
+static bool _pingEndpointOnce(uint32_t pingTimeoutMs)
+{
+  ip_addr_t target_addr = {};
+  if(!ipaddr_aton(INTERNET_PING_TARGET, &target_addr)) {
+    ESP_LOGE(LOGTAG, "Invalid internet ping target: %s", INTERNET_PING_TARGET);
+    return false;
+  }
+
+  PingContext ctx = {
+    .done = xSemaphoreCreateBinary(),
+    .success = false,
+  };
+  if(ctx.done == nullptr) {
+    ESP_LOGE(LOGTAG, "Failed to create ping sync semaphore");
+    return false;
+  }
+
+  esp_ping_config_t ping_config = ESP_PING_DEFAULT_CONFIG();
+  ping_config.target_addr = target_addr;
+  ping_config.count = 1;
+  ping_config.interval_ms = pingTimeoutMs;
+  ping_config.timeout_ms = pingTimeoutMs;
+
+  esp_ping_callbacks_t callbacks = {
+    .cb_args = &ctx,
+    .on_ping_success = _on_ping_success,
+    .on_ping_timeout = nullptr,
+    .on_ping_end = _on_ping_end,
+  };
+
+  esp_ping_handle_t ping_handle = nullptr;
+  esp_err_t ret = esp_ping_new_session(&ping_config, &callbacks, &ping_handle);
+  if(ret != ESP_OK) {
+    ESP_LOGW(LOGTAG, "Failed to create ping session: %s", esp_err_to_name(ret));
+    vSemaphoreDelete(ctx.done);
+    return false;
+  }
+
+  ret = esp_ping_start(ping_handle);
+  if(ret != ESP_OK) {
+    ESP_LOGW(LOGTAG, "Failed to start ping session: %s", esp_err_to_name(ret));
+    esp_ping_delete_session(ping_handle);
+    vSemaphoreDelete(ctx.done);
+    return false;
+  }
+
+  const TickType_t waitTicks = pdMS_TO_TICKS(pingTimeoutMs + 1000);
+  bool finished = xSemaphoreTake(ctx.done, waitTicks) == pdTRUE;
+
+  esp_ping_stop(ping_handle);
+  esp_ping_delete_session(ping_handle);
+  vSemaphoreDelete(ctx.done);
+
+  return finished && ctx.success;
+}
+
+static bool _performInternetCheckWithinTimeout(uint32_t totalTimeoutSeconds)
+{
+  const uint32_t totalTimeoutMs = totalTimeoutSeconds * 1000;
+  const uint32_t perAttemptMs = 2000;
+  const TickType_t startTick = xTaskGetTickCount();
+
+  do {
+    if(_pingEndpointOnce(perAttemptMs)) {
+      return true;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    const TickType_t elapsed = xTaskGetTickCount() - startTick;
+    if(pdTICKS_TO_MS(elapsed) >= totalTimeoutMs) {
+      break;
+    }
+  } while(true);
+
+  return false;
+}
+
+static bool _verifyInternetReachabilityOnDriver(driver::Driver* candidate,
+                                                uint32_t totalTimeoutSeconds)
+{
+  esp_netif_t* previousDefault = esp_netif_get_default_netif();
+  esp_netif_set_default_netif(candidate->getInterface());
+
+  ESP_LOGI(LOGTAG, "Running internet check for %.*s via candidate interface",
+           (int) candidate->name.size(), candidate->name.data());
+
+  bool success = _performInternetCheckWithinTimeout(totalTimeoutSeconds);
+
+  if(!success && previousDefault != nullptr) {
+    // Restore previous route when candidate validation fails.
+    esp_netif_set_default_netif(previousDefault);
+  }
+
+  return success;
+}
+
+static void _postNetworkUpEvent(driver::InterfaceType type, const char* driverName,
+                                esp_netif_t* netif)
+{
+  esp_netif_ip_info_t ip_info = {};
+  esp_netif_dns_info_t dns_main = {};
+  esp_netif_dns_info_t dns_backup = {};
+
+  if(esp_netif_get_ip_info(netif, &ip_info) != ESP_OK) {
+    ESP_LOGW(LOGTAG, "Could not read IP info for %s while posting NETWORK_UP", driverName);
+    return;
+  }
+
+  esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns_main);
+  esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dns_backup);
+
+  uc_network_event_t net_event = {
+    .interface_type = type,
+    .driver_name = driverName,
+    .ip_info = ip_info,
+    .dns_main = dns_main.ip.u_addr.ip4,
+    .dns_backup = dns_backup.ip.u_addr.ip4,
+  };
+
+  esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_UP,
+                 &net_event, sizeof(net_event), portMAX_DELAY);
+}
+
+static const char* _driverNameForType(driver::InterfaceType type)
+{
+  switch(type) {
+  case driver::WIFI:
+    return "Espressif WiFi";
+  case driver::CELLULAR:
+    return "Sequans Monarch Modem";
+  case driver::ETHERNET:
+    return "Ethernet";
+  default:
+    return "Unknown";
+  }
+}
+
 void unified_controller_event_handler(void* arg, esp_event_base_t base, int32_t id, void* data)
 {
   UnifiedController* self = static_cast<UnifiedController*>(arg);
@@ -109,35 +276,34 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
 
     xEventGroupSetBits(ip_event_group, STA_IP_BIT);
 
-    uc_network_event_t net_event = {
-      .interface_type = driver::WIFI,
-      .driver_name    = "Espressif WiFi",
-      .ip_info        = event->ip_info,
-      .dns_main       = dns_main.ip.u_addr.ip4,
-      .dns_backup     = dns_backup.ip.u_addr.ip4,
-    };
-    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_UP,
-                   &net_event, sizeof(net_event), portMAX_DELAY);
+    if(!controller->requiresInternetCheck(driver::WIFI)) {
+      _postNetworkUpEvent(driver::WIFI, "Espressif WiFi", netif);
+    }
     break;
   }
   case IP_EVENT_STA_LOST_IP: {
     if(!(bits & STA_IP_BIT))
       break;
 
+    const bool wasSelected = controller->isSelectedDriverType(driver::WIFI);
+
     ESP_LOGW(LOGTAG, "Station lost IP address");
     xEventGroupClearBits(ip_event_group, STA_IP_BIT);
+    controller->clearSelectedDriverIfType(driver::WIFI);
 
-    uc_network_event_t net_event = {
-      .interface_type = driver::WIFI,
-      .driver_name    = "Espressif WiFi",
-      .ip_info        = {},
-      .dns_main       = {},
-      .dns_backup     = {},
-    };
-    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
-                   &net_event, sizeof(net_event), portMAX_DELAY);
+    if(wasSelected) {
+      uc_network_event_t net_event = {
+        .interface_type = driver::WIFI,
+        .driver_name    = "Espressif WiFi",
+        .ip_info        = {},
+        .dns_main       = {},
+        .dns_backup     = {},
+      };
+      esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                     &net_event, sizeof(net_event), portMAX_DELAY);
 
-    controller->triggerReconnect();
+      controller->triggerReconnect();
+    }
     break;
   }
   case IP_EVENT_AP_STAIPASSIGNED: {
@@ -171,35 +337,34 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
 
     xEventGroupSetBits(ip_event_group, ETH_IP_BIT);
 
-    uc_network_event_t net_event = {
-      .interface_type = driver::ETHERNET,
-      .driver_name    = "Ethernet",
-      .ip_info        = event->ip_info,
-      .dns_main       = dns_main.ip.u_addr.ip4,
-      .dns_backup     = dns_backup.ip.u_addr.ip4,
-    };
-    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_UP,
-                   &net_event, sizeof(net_event), portMAX_DELAY);
+    if(!controller->requiresInternetCheck(driver::ETHERNET)) {
+      _postNetworkUpEvent(driver::ETHERNET, "Ethernet", netif);
+    }
     break;
   }
   case IP_EVENT_ETH_LOST_IP: {
     if(!(bits & ETH_IP_BIT))
       break;
 
+    const bool wasSelected = controller->isSelectedDriverType(driver::ETHERNET);
+
     ESP_LOGW(LOGTAG, "Ethernet lost IP address");
     xEventGroupClearBits(ip_event_group, ETH_IP_BIT);
+    controller->clearSelectedDriverIfType(driver::ETHERNET);
 
-    uc_network_event_t net_event = {
-      .interface_type = driver::ETHERNET,
-      .driver_name    = "Ethernet",
-      .ip_info        = {},
-      .dns_main       = {},
-      .dns_backup     = {},
-    };
-    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
-                   &net_event, sizeof(net_event), portMAX_DELAY);
+    if(wasSelected) {
+      uc_network_event_t net_event = {
+        .interface_type = driver::ETHERNET,
+        .driver_name    = "Ethernet",
+        .ip_info        = {},
+        .dns_main       = {},
+        .dns_backup     = {},
+      };
+      esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                     &net_event, sizeof(net_event), portMAX_DELAY);
 
-    controller->triggerReconnect();
+      controller->triggerReconnect();
+    }
     break;
   }
   case IP_EVENT_PPP_GOT_IP: {
@@ -225,35 +390,34 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
 
     xEventGroupSetBits(ip_event_group, PPP_IP_BIT);
 
-    uc_network_event_t net_event = {
-      .interface_type = driver::CELLULAR,
-      .driver_name    = "Sequans Monarch Modem",
-      .ip_info        = event->ip_info,
-      .dns_main       = dns_main.ip.u_addr.ip4,
-      .dns_backup     = dns_backup.ip.u_addr.ip4,
-    };
-    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_UP,
-                   &net_event, sizeof(net_event), portMAX_DELAY);
+    if(!controller->requiresInternetCheck(driver::CELLULAR)) {
+      _postNetworkUpEvent(driver::CELLULAR, "Sequans Monarch Modem", netif);
+    }
     break;
   }
   case IP_EVENT_PPP_LOST_IP: {
     if(!(bits & PPP_IP_BIT))
       break;
 
+    const bool wasSelected = controller->isSelectedDriverType(driver::CELLULAR);
+
     ESP_LOGW(LOGTAG, "PPP interface lost IP address");
     xEventGroupClearBits(ip_event_group, PPP_IP_BIT);
+    controller->clearSelectedDriverIfType(driver::CELLULAR);
 
-    uc_network_event_t net_event = {
-      .interface_type = driver::CELLULAR,
-      .driver_name    = "Sequans Monarch Modem",
-      .ip_info        = {},
-      .dns_main       = {},
-      .dns_backup     = {},
-    };
-    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
-                   &net_event, sizeof(net_event), portMAX_DELAY);
+    if(wasSelected) {
+      uc_network_event_t net_event = {
+        .interface_type = driver::CELLULAR,
+        .driver_name    = "Sequans Monarch Modem",
+        .ip_info        = {},
+        .dns_main       = {},
+        .dns_backup     = {},
+      };
+      esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                     &net_event, sizeof(net_event), portMAX_DELAY);
 
-    controller->triggerReconnect();
+      controller->triggerReconnect();
+    }
     break;
   }
   case IP_EVENT_TX_RX:
@@ -280,6 +444,33 @@ void UnifiedController::printConfig()
   }
 }
 
+bool UnifiedController::requiresInternetCheck(driver::InterfaceType type) const
+{
+  if(_board_config == nullptr) {
+    return false;
+  }
+
+  for(size_t i = 0; _board_config->drivers[i] != nullptr; ++i) {
+    driver::Driver* candidate = _board_config->drivers[i];
+    if(candidate->type == type) {
+      return candidate->requiresInternetCheck();
+    }
+  }
+
+  return false;
+}
+
+bool UnifiedController::isSelectedDriverType(driver::InterfaceType type) const
+{
+  return _selected_driver != nullptr && _selected_driver->type == type;
+}
+
+void UnifiedController::clearSelectedDriverIfType(driver::InterfaceType type)
+{
+  if(_selected_driver != nullptr && _selected_driver->type == type) {
+    _selected_driver = nullptr;
+  }
+}
 bool UnifiedController::start()
 {
   if(_board_config->drivers[0] == nullptr) {
@@ -332,6 +523,7 @@ void UnifiedController::connectBestDriver()
 {
   ESP_LOGI(LOGTAG, "(Re)connecting drivers");
 
+  driver::Driver* previousSelected = _selected_driver;
   driver::Driver* bestDriver = nullptr;
 
   // Iterate through every driver starting with the highest priority, until one is connected
@@ -355,6 +547,15 @@ void UnifiedController::connectBestDriver()
     EventBits_t bits = xEventGroupGetBits(ip_event_group);
     if(bits & driverBit) {
       ESP_LOGI(LOGTAG, "%.*s already connected", (int) driver->name.size(), driver->name.data());
+      if(driver->requiresInternetCheck() &&
+         !_verifyInternetReachabilityOnDriver(driver, driver->getConnectionTimeoutSeconds())) {
+        ESP_LOGW(LOGTAG,
+                 "%.*s has IP but failed internet reachability check; trying next driver",
+                 (int) driver->name.size(), driver->name.data());
+        xEventGroupClearBits(ip_event_group, driverBit);
+        driver->disconnect();
+        continue;
+      }
       bestDriver = driver;
       continue;
     }
@@ -366,13 +567,23 @@ void UnifiedController::connectBestDriver()
     }
 
     // Wait for IP on this driver's interface (per-driver configurable timeout)
-    ESP_LOGI(LOGTAG, "%.*s waiting up to %" PRIu32 " ms for an IP",
+    ESP_LOGI(LOGTAG, "%.*s waiting up to %" PRIu32 " s for an IP",
              (int) driver->name.size(), driver->name.data(),
-             driver->getConnectionTimeoutMs());
+             driver->getConnectionTimeoutSeconds());
     bits = xEventGroupWaitBits(ip_event_group, driverBit, pdFALSE, pdTRUE,
-                               pdMS_TO_TICKS(driver->getConnectionTimeoutMs()));
+                               pdMS_TO_TICKS(driver->getConnectionTimeoutSeconds() * 1000));
 
     if(bits & driverBit) {
+      if(driver->requiresInternetCheck() &&
+         !_verifyInternetReachabilityOnDriver(driver, driver->getConnectionTimeoutSeconds())) {
+        ESP_LOGW(LOGTAG,
+                 "%.*s failed internet reachability check; trying next driver",
+                 (int) driver->name.size(), driver->name.data());
+        xEventGroupClearBits(ip_event_group, driverBit);
+        driver->disconnect();
+        continue;
+      }
+
       bestDriver = driver;
       ESP_LOGI(LOGTAG, "%.*s connected", (int) driver->name.size(), driver->name.data());
     } else {
@@ -380,6 +591,13 @@ void UnifiedController::connectBestDriver()
                driver->name.data());
       driver->disconnect();
     }
+  }
+
+  if(bestDriver != nullptr && bestDriver->requiresInternetCheck() &&
+     bestDriver != previousSelected) {
+    _postNetworkUpEvent(bestDriver->type,
+                        _driverNameForType(bestDriver->type),
+                        bestDriver->getInterface());
   }
 
   _selected_driver = bestDriver;
