@@ -180,20 +180,26 @@ static bool _performInternetCheckWithinTimeout(uint32_t totalTimeoutSeconds)
   return false;
 }
 
-static bool _verifyInternetReachabilityOnDriver(driver::Driver* candidate,
-                                                uint32_t totalTimeoutSeconds)
+static bool _verifyInternetReachabilityOnDriver(driver::Driver* candidate)
 {
+  constexpr uint32_t PING_TIMEOUT_S = 10;
   esp_netif_t* previousDefault = esp_netif_get_default_netif();
   esp_netif_set_default_netif(candidate->getInterface());
 
-  ESP_LOGI(LOGTAG, "Running internet check for %.*s via candidate interface",
+  ESP_LOGI(LOGTAG, "Running internet check for %.*s …",
            (int) candidate->name.size(), candidate->name.data());
 
-  bool success = _performInternetCheckWithinTimeout(totalTimeoutSeconds);
+  bool success = _performInternetCheckWithinTimeout(PING_TIMEOUT_S);
 
-  if(!success && previousDefault != nullptr) {
-    // Restore previous route when candidate validation fails.
-    esp_netif_set_default_netif(previousDefault);
+  if(success) {
+    ESP_LOGI(LOGTAG, "Internet check passed for %.*s",
+             (int) candidate->name.size(), candidate->name.data());
+  } else {
+    ESP_LOGW(LOGTAG, "Internet check failed for %.*s",
+             (int) candidate->name.size(), candidate->name.data());
+    if(previousDefault != nullptr) {
+      esp_netif_set_default_netif(previousDefault);
+    }
   }
 
   return success;
@@ -302,7 +308,7 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
       esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
                      &net_event, sizeof(net_event), portMAX_DELAY);
 
-      controller->triggerReconnect();
+      controller->triggerEvaluation();
     }
     break;
   }
@@ -363,7 +369,7 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
       esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
                      &net_event, sizeof(net_event), portMAX_DELAY);
 
-      controller->triggerReconnect();
+      controller->triggerEvaluation();
     }
     break;
   }
@@ -416,7 +422,7 @@ static void _handleIpEvent(void* handler_args, esp_event_base_t base, int32_t ev
       esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
                      &net_event, sizeof(net_event), portMAX_DELAY);
 
-      controller->triggerReconnect();
+      controller->triggerEvaluation();
     }
     break;
   }
@@ -506,6 +512,10 @@ bool UnifiedController::start()
   if(!ip_event_group)
     return false;
 
+  // Schedule the first evaluation before creating the task so the task sees
+  // EvaluationSchedule::Soon on its very first iteration and does not suspend itself.
+  _evaluation_schedule = EvaluationSchedule::Soon;
+
   xTaskCreate(&UnifiedController::_ucTask, "Unified Controller Task", 4096, this, 5,
               &_uc_task_handle);
 
@@ -514,17 +524,33 @@ bool UnifiedController::start()
     return false;
   }
 
-  triggerReconnect();
-
   return true;
 }
 
-void UnifiedController::connectBestDriver()
+void UnifiedController::evaluateDrivers()
 {
-  ESP_LOGI(LOGTAG, "(Re)connecting drivers");
+  ESP_LOGI(LOGTAG, "Evaluating available drivers");
 
   driver::Driver* previousSelected = _selected_driver;
   driver::Driver* bestDriver = nullptr;
+
+  // Helper: fire NETWORK_DOWN for the previously-selected driver exactly once,
+  // as soon as we know it is being dropped.  Clears previousSelected so the
+  // end-of-function guard doesn't fire a duplicate.
+  auto notifyDownIfWasSelected = [&](driver::Driver* dropped) {
+    if(previousSelected != nullptr && dropped == previousSelected) {
+      uc_network_event_t net_event = {
+        .interface_type = previousSelected->type,
+        .driver_name    = _driverNameForType(previousSelected->type),
+        .ip_info        = {},
+        .dns_main       = {},
+        .dns_backup     = {},
+      };
+      esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                     &net_event, sizeof(net_event), portMAX_DELAY);
+      previousSelected = nullptr; // consumed – prevent duplicate at end
+    }
+  };
 
   // Iterate through every driver starting with the highest priority, until one is connected
   for(driver::Driver** current = _board_config->drivers;
@@ -546,12 +572,13 @@ void UnifiedController::connectBestDriver()
     // Skip if driver already has IP
     EventBits_t bits = xEventGroupGetBits(ip_event_group);
     if(bits & driverBit) {
-      ESP_LOGI(LOGTAG, "%.*s already connected", (int) driver->name.size(), driver->name.data());
+      ESP_LOGI(LOGTAG, "%.*s already has IP, verifying", (int) driver->name.size(), driver->name.data());
       if(driver->requiresInternetCheck() &&
-         !_verifyInternetReachabilityOnDriver(driver, driver->getConnectionTimeoutSeconds())) {
+         !_verifyInternetReachabilityOnDriver(driver)) {
         ESP_LOGW(LOGTAG,
-                 "%.*s has IP but failed internet reachability check; trying next driver",
+                 "%.*s has IP but failed internet check – skipping",
                  (int) driver->name.size(), driver->name.data());
+        notifyDownIfWasSelected(driver);
         xEventGroupClearBits(ip_event_group, driverBit);
         driver->disconnect();
         continue;
@@ -561,36 +588,55 @@ void UnifiedController::connectBestDriver()
     }
 
     if(!driver->connect()) {
-      ESP_LOGW(LOGTAG, "%.*s couldn't connect", (int) driver->name.size(), driver->name.data());
+      ESP_LOGW(LOGTAG, "%.*s failed to connect", (int) driver->name.size(), driver->name.data());
+      notifyDownIfWasSelected(driver);
       driver->disconnect();
       continue;
     }
 
-    // Wait for IP on this driver's interface (per-driver configurable timeout)
+    // Once the driver reports it is connected, the IP should arrive quickly.
+    // Cap the wait at 10 s – if DHCP/PPP negotiation hasn't finished by then
+    // the interface is considered unusable and we fall through to the next driver.
+    constexpr uint32_t IP_ACQUIRE_TIMEOUT_S = 10;
     ESP_LOGI(LOGTAG, "%.*s waiting up to %" PRIu32 " s for an IP",
-             (int) driver->name.size(), driver->name.data(),
-             driver->getConnectionTimeoutSeconds());
+             (int) driver->name.size(), driver->name.data(), IP_ACQUIRE_TIMEOUT_S);
     bits = xEventGroupWaitBits(ip_event_group, driverBit, pdFALSE, pdTRUE,
-                               pdMS_TO_TICKS(driver->getConnectionTimeoutSeconds() * 1000));
+                               pdMS_TO_TICKS(IP_ACQUIRE_TIMEOUT_S * 1000));
 
     if(bits & driverBit) {
+      ESP_LOGI(LOGTAG, "%.*s connected", (int) driver->name.size(), driver->name.data());
       if(driver->requiresInternetCheck() &&
-         !_verifyInternetReachabilityOnDriver(driver, driver->getConnectionTimeoutSeconds())) {
+         !_verifyInternetReachabilityOnDriver(driver)) {
         ESP_LOGW(LOGTAG,
-                 "%.*s failed internet reachability check; trying next driver",
+                 "%.*s failed internet check after IP acquired – skipping",
                  (int) driver->name.size(), driver->name.data());
+        notifyDownIfWasSelected(driver);
         xEventGroupClearBits(ip_event_group, driverBit);
         driver->disconnect();
         continue;
       }
 
       bestDriver = driver;
-      ESP_LOGI(LOGTAG, "%.*s connected", (int) driver->name.size(), driver->name.data());
     } else {
-      ESP_LOGW(LOGTAG, "%.*s connected but never received an IP", (int) driver->name.size(),
+      ESP_LOGW(LOGTAG, "%.*s timed out waiting for an IP – skipping", (int) driver->name.size(),
                driver->name.data());
+      notifyDownIfWasSelected(driver);
       driver->disconnect();
     }
+  }
+
+  // If the selected driver is changing (including going to nullptr), notify the
+  // application that the previous interface is no longer available.
+  if(previousSelected != nullptr && bestDriver != previousSelected) {
+    uc_network_event_t net_event = {
+      .interface_type = previousSelected->type,
+      .driver_name    = _driverNameForType(previousSelected->type),
+      .ip_info        = {},
+      .dns_main       = {},
+      .dns_backup     = {},
+    };
+    esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                   &net_event, sizeof(net_event), portMAX_DELAY);
   }
 
   if(bestDriver != nullptr && bestDriver->requiresInternetCheck() &&
@@ -603,7 +649,7 @@ void UnifiedController::connectBestDriver()
   _selected_driver = bestDriver;
 }
 
-void UnifiedController::disconnectUnselectedDrivers()
+void UnifiedController::deactivateUnselectedDrivers()
 {
   driver::Driver** current = _board_config->drivers;
 
@@ -707,13 +753,12 @@ void UnifiedController::_destroyEventLoop()
   }
 }
 
-void UnifiedController::triggerReconnect()
+void UnifiedController::triggerEvaluation()
 {
-  _reconnect_time = ReconnectTimer::ShortPoll;
+  _evaluation_schedule = EvaluationSchedule::Soon;
 
-  // Resume the task if it's suspended
+  // Wake the evaluation task if it is suspended or waiting
   vTaskResume(_uc_task_handle);
-  // interupt current delay and start connecting immediately
   xTaskNotifyGive(_uc_task_handle);
 }
 
@@ -722,45 +767,63 @@ void UnifiedController::_ucTask(void* pvParameters)
   UnifiedController* self = static_cast<UnifiedController*>(pvParameters);
 
   while(true) {
-    if(self->_reconnect_time == ReconnectTimer::None) {
-      vTaskSuspend(nullptr); // Suspend until resumed
+    if(self->_evaluation_schedule == EvaluationSchedule::Idle) {
+      vTaskSuspend(nullptr); // Suspend until an evaluation is triggered
       continue;
     }
 
     self->_sortDrivers();
-    self->connectBestDriver();
+    self->evaluateDrivers();
 
     driver::Driver* drv = self->_selected_driver;
 
     if(drv != nullptr) {
-      if(drv->getPriority() == self->_board_config->drivers[0]->getPriority()) {
-        // An active network driver that is the highest priority should remain active as long as
-        // possible
-        self->_reconnect_time = ReconnectTimer::None;
+      const bool isHighestPriority = drv->getPriority() == self->_board_config->drivers[0]->getPriority();
+      const bool needsPeriodicCheck = !isHighestPriority || drv->requiresInternetCheck();
+
+      if(needsPeriodicCheck) {
+        // Re-evaluate periodically either because a higher-priority driver may become
+        // available, or because this driver requires ongoing internet reachability checks.
+        self->_evaluation_schedule = EvaluationSchedule::Periodic;
       } else {
-        // An active network driver that isn't the highest priority will re-evaluate once in a while
-        self->_reconnect_time = ReconnectTimer::LongPoll;
+        // Highest-priority driver active with no internet check – nothing to re-evaluate.
+        self->_evaluation_schedule = EvaluationSchedule::Idle;
       }
 
       ESP_LOGI(LOGTAG,
-               " === Selecting [ %.*s ] as default network driver === ", (int) drv->name.size(),
+               " === Selected [ %.*s ] as active network driver === ", (int) drv->name.size(),
                drv->name.data());
+
+      // Log the next evaluation schedule immediately after selection, before the potentially
+      // slow deactivateUnselectedDrivers() call so it appears at the right point in the log.
+      switch(self->_evaluation_schedule) {
+      case EvaluationSchedule::Soon:
+        ESP_LOGI(LOGTAG, "Next driver evaluation in 20 s");
+        break;
+      case EvaluationSchedule::Periodic:
+        ESP_LOGI(LOGTAG, "Next driver evaluation in 5 min");
+        break;
+      default:
+        ESP_LOGI(LOGTAG, "Highest-priority driver active – no periodic re-evaluation scheduled");
+        break;
+      }
+
       esp_netif_set_default_netif(drv->getInterface());
-      self->disconnectUnselectedDrivers();
+      self->deactivateUnselectedDrivers();
 
     } else {
-      // No active network driver means we should try to connect again soon
-      self->_reconnect_time = ReconnectTimer::ShortPoll;
-      ESP_LOGW(LOGTAG, "No driver was able to connect to the network. Retrying soon...");
+      // No driver is usable – schedule a retry soon
+      self->_evaluation_schedule = EvaluationSchedule::Soon;
+      ESP_LOGW(LOGTAG, "No driver could provide a network connection. Retrying soon...");
     }
 
-    // Wait for next reconnect, but can be woken up immediately
+    // Wait for the next scheduled evaluation, but allow early wake via notification
     TickType_t delay_ticks = 0;
-    switch(self->_reconnect_time) {
-    case ReconnectTimer::ShortPoll:
+    switch(self->_evaluation_schedule) {
+    case EvaluationSchedule::Soon:
       delay_ticks = pdMS_TO_TICKS(20 * 1000);
       break;
-    case ReconnectTimer::LongPoll:
+    case EvaluationSchedule::Periodic:
       delay_ticks = pdMS_TO_TICKS(5 * 60 * 1000);
       break;
     default:
@@ -795,26 +858,59 @@ void UnifiedController::driverEventHandler(esp_event_base_t event_base, int32_t 
       if(!(xEventGroupGetBits(ip_event_group) & PPP_IP_BIT))
         break;
 
-      ESP_LOGW(LOGTAG, "CELLULAR Interface disconnected from the network");
+      const bool wasSelected = isSelectedDriverType(driver::CELLULAR);
+      ESP_LOGW(LOGTAG, "Cellular interface lost connection");
 
       xEventGroupClearBits(ip_event_group, PPP_IP_BIT);
-      triggerReconnect();
+      clearSelectedDriverIfType(driver::CELLULAR);
+
+      if(wasSelected) {
+        uc_network_event_t net_event = {
+          .interface_type = driver::CELLULAR,
+          .driver_name    = _driverNameForType(driver::CELLULAR),
+        };
+        esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                       &net_event, sizeof(net_event), portMAX_DELAY);
+        triggerEvaluation();
+      }
     } else if(*iftype == driver::InterfaceType::WIFI) {
       if(!(xEventGroupGetBits(ip_event_group) & STA_IP_BIT))
         break;
 
-      ESP_LOGW(LOGTAG, "WIFI Interface disconnected from the network");
+      const bool wasSelected = isSelectedDriverType(driver::WIFI);
+      ESP_LOGW(LOGTAG, "Wi-Fi interface lost connection");
 
       xEventGroupClearBits(ip_event_group, STA_IP_BIT);
-      triggerReconnect();
+      clearSelectedDriverIfType(driver::WIFI);
+
+      if(wasSelected) {
+        uc_network_event_t net_event = {
+          .interface_type = driver::WIFI,
+          .driver_name    = _driverNameForType(driver::WIFI),
+        };
+        esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                       &net_event, sizeof(net_event), portMAX_DELAY);
+        triggerEvaluation();
+      }
     } else if(*iftype == driver::InterfaceType::ETHERNET) {
       if(!(xEventGroupGetBits(ip_event_group) & ETH_IP_BIT))
         break;
 
-      ESP_LOGW(LOGTAG, "ETHERNET Interface disconnected from the network");
+      const bool wasSelected = isSelectedDriverType(driver::ETHERNET);
+      ESP_LOGW(LOGTAG, "Ethernet interface lost connection");
 
       xEventGroupClearBits(ip_event_group, ETH_IP_BIT);
-      triggerReconnect();
+      clearSelectedDriverIfType(driver::ETHERNET);
+
+      if(wasSelected) {
+        uc_network_event_t net_event = {
+          .interface_type = driver::ETHERNET,
+          .driver_name    = _driverNameForType(driver::ETHERNET),
+        };
+        esp_event_post(UC_NETWORK_EVENT_BASE, UC_EVENT_NETWORK_DOWN,
+                       &net_event, sizeof(net_event), portMAX_DELAY);
+        triggerEvaluation();
+      }
     }
     break;
   }

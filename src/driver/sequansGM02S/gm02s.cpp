@@ -270,7 +270,7 @@ esp_modem::command_result gm02s::command(const std::string& command,
 esp_modem::command_result gm02s::waitForConnection(uint32_t timeoutMs)
 {
   const auto pass = std::list<std::string_view>({ "+CEREG: 1", "+CEREG: 5" });
-  ESP_LOGI(LOGTAG, "Waiting up to %" PRIu32 " ms for mobile network registration", timeoutMs);
+  ESP_LOGI(LOGTAG, "Waiting up to %" PRIu32 " s for mobile network registration", timeoutMs / 1000);
   esp_modem::command_result res = command("", pass, {}, static_cast<int>(timeoutMs));
   if(res == esp_modem::command_result::OK) {
     ESP_LOGI(LOGTAG, "Connected to mobile network");

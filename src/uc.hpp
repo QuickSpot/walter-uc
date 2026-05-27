@@ -56,7 +56,7 @@ struct sUnifiedCommInternal {
   driver::Driver* drivers[];
 };
 
-enum class ReconnectTimer { None, ShortPoll, LongPoll };
+enum class EvaluationSchedule { Idle, Soon, Periodic };
 
 class UnifiedController
 {
@@ -80,11 +80,13 @@ public:
   void driverEventHandler(esp_event_base_t event_base, int32_t event_id, void* event_data);
 
   /**
-   * @brief attempt to connect the highest priority driver to the network
+   * @brief Evaluate all configured drivers by priority, connect to the best
+   * available one, and deactivate lower-priority drivers that are no longer
+   * needed.
    */
-  void connectBestDriver();
+  void evaluateDrivers();
 
-  void disconnectUnselectedDrivers();
+  void deactivateUnselectedDrivers();
 
   /**
    * @brief this function registers an event handler to the unifiedController
@@ -138,9 +140,9 @@ public:
   void clearSelectedDriverIfType(driver::InterfaceType type);
 
   /**
-   * @brief instantly trigger a reconnection logic and set the poll interval to short
+   * @brief Schedule an immediate driver evaluation and wake the evaluation task.
    */
-  void triggerReconnect();
+  void triggerEvaluation();
 
 private:
   /**
@@ -159,7 +161,8 @@ private:
   void _destroyEventLoop();
 
   /**
-   * @brief the reconnection FreeRTOS task
+   * @brief Driver evaluation FreeRTOS task – woken whenever a re-evaluation
+   * is scheduled.
    */
   static void _ucTask(void* param);
 
@@ -167,7 +170,7 @@ private:
   static inline bool init; /* There can ever be only 1 instance of UnifiedController at a time. */
   esp_event_loop_handle_t _event_loop = nullptr; /* eventLoop => nullptr, not initialized */
   static inline TaskHandle_t _uc_task_handle = nullptr;
-  ReconnectTimer _reconnect_time = ReconnectTimer::None;
+  EvaluationSchedule _evaluation_schedule = EvaluationSchedule::Idle;
   driver::Driver* _selected_driver = nullptr;
 };
 
