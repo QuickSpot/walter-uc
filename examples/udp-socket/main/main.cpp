@@ -2,7 +2,7 @@
  * @file main.c
  * @author Daan Pape (daan@dptechnics.com)
  * @author Arnoud Devoogdt (arnoud@dptechnics.com)
- * @version 0.2.0
+ * @version 0.3.0
  * @date 2026-04-08
  * @copyright Copyright (c) 2026 DPTechnics BV (info@dptechnics.com)
  * @brief This code connects to a UDP socket using the walter-uc library.
@@ -158,7 +158,7 @@ static int open_udp_socket(const char* host, const char* port, struct addrinfo**
 
 extern "C" void app_main(void)
 {
-  ESP_LOGI(TAG, "Unified Comms UDP Socket example V0.2.0");
+  ESP_LOGI(TAG, "Unified Comms UDP Socket example V0.3.0");
 
   /* Store the task handle before registering event handlers so the callbacks
    * can safely notify it the moment start() triggers the first connection. */

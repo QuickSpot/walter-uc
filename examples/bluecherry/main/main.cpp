@@ -2,7 +2,7 @@
  * @file main.c
  * @author Daan Pape (daan@dptechnics.com)
  * @author Arnoud Devoogdt (arnoud@dptechnics.com)
- * @version 0.2.0
+ * @version 0.3.0
  * @date 2026-04-08
  * @copyright Copyright (c) 2026 DPTechnics BV (info@dptechnics.com)
  * @brief This code connects to the BlueCherry platform using the walter-uc library.
@@ -196,7 +196,7 @@ static void uc_network_event_handler(void* arg, esp_event_base_t base,
  */
 extern "C" void app_main(void)
 {
-  ESP_LOGI(TAG, "Unified Comms BlueCherry example V0.2.0");
+  ESP_LOGI(TAG, "Unified Comms BlueCherry example V0.3.0");
 
   /* Store the task handle before registering handlers so callbacks can
    * safely notify it as soon as start() makes the first connection. */
